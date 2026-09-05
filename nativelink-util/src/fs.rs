@@ -375,16 +375,17 @@ impl AsMut<tokio::fs::ReadDir> for ReadDir {
 }
 
 pub async fn read_dir(path: impl AsRef<Path>) -> Result<ReadDir, Error> {
-    let path = path.as_ref().to_owned();
-    let (permit, inner) = call_with_permit(move |permit| {
-        Ok((
-            permit,
-            tokio::runtime::Handle::current()
-                .block_on(tokio::fs::read_dir(path))
-                .map_err(Into::<Error>::into)?,
-        ))
-    })
-    .await?;
+    // Take the permit here and open the directory on tokio's own blocking
+    // pool. This must NOT go through `call_with_permit`: `tokio::fs::read_dir`
+    // is itself a `spawn_blocking`, so wrapping it in `Handle::block_on`
+    // inside another `spawn_blocking` parks one pool thread per call while it
+    // waits for a second pool task. With more concurrent `read_dir` calls than
+    // the pool has threads (the worker uploading an output tree with thousands
+    // of directories) the pool holds only waiters and the process deadlocks.
+    let permit = get_permit().await?;
+    let inner = tokio::fs::read_dir(path.as_ref())
+        .await
+        .map_err(Into::<Error>::into)?;
     Ok(ReadDir { permit, inner })
 }
 
